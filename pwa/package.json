@@ -1,0 +1,21 @@
+{
+  "name": "vault-of-us-pwa",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.117.2",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.6",
+    "supabase": "^2.118.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.12"
+  }
+}
