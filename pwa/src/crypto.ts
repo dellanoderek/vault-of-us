@@ -62,7 +62,7 @@ export async function createVault(passphrase: string): Promise<{ settings: Vault
   const rawVaultKey = crypto.getRandomValues(new Uint8Array(32));
   const wrappingIv = crypto.getRandomValues(new Uint8Array(12));
   const wrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: asArrayBuffer(wrappingIv) }, wrappingKey, asArrayBuffer(rawVaultKey));
-  const key = await crypto.subtle.importKey('raw', rawVaultKey, 'AES-GCM', false, ['encrypt', 'decrypt']);
+  const key = await crypto.subtle.importKey('raw', rawVaultKey, 'AES-GCM', true, ['encrypt', 'decrypt']);
   rawVaultKey.fill(0);
   return {
     settings: {
@@ -83,7 +83,7 @@ export async function unlockVault(passphrase: string, settings: VaultSettings): 
     wrappingKey,
     asArrayBuffer(fromBase64(settings.wrappedKey)),
   );
-  return crypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['encrypt', 'decrypt']);
+  return crypto.subtle.importKey('raw', rawKey, 'AES-GCM', true, ['encrypt', 'decrypt']);
 }
 
 export async function encryptBytes(key: CryptoKey, cleartext: ArrayBuffer | Uint8Array): Promise<{ iv: string; ciphertext: Uint8Array }> {

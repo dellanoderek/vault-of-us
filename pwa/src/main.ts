@@ -803,7 +803,35 @@ function showToast(message: string): void {
 
 async function start(): Promise<void> {
   if ('serviceWorker' in navigator && window.isSecureContext) {
-    navigator.serviceWorker.register('/sw.js').catch(() => undefined);
+    navigator.serviceWorker.register('/sw.js').then((registration) => {
+      registration.addEventListener('updatefound', () => {
+        const newWorker = registration.installing;
+        if (!newWorker) return;
+        newWorker.addEventListener('statechange', () => {
+          if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+            const toast = document.createElement('div');
+            toast.className = 'toast update-toast';
+            toast.style.display = 'flex';
+            toast.style.justifyContent = 'space-between';
+            toast.style.alignItems = 'center';
+            toast.innerHTML = '<span>Nova versão disponível!</span> <button style="background:none;border:none;color:#00e5ff;font-weight:bold;cursor:pointer;font-size:1rem;padding:0 0 0 1rem;">Atualizar</button>';
+            toast.querySelector('button')?.addEventListener('click', () => {
+              toast.textContent = 'Atualizando...';
+              newWorker.postMessage({ type: 'SKIP_WAITING' });
+            });
+            document.body.append(toast);
+          }
+        });
+      });
+    }).catch(() => undefined);
+    
+    let refreshing = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!refreshing) {
+        refreshing = true;
+        window.location.reload();
+      }
+    });
   }
   try {
     await openDb();
