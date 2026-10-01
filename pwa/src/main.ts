@@ -380,7 +380,44 @@ async function renderSettings(panel: HTMLElement): Promise<void> {
       <section class="settings-card"><p class="eyebrow">RECUPERAÇÃO</p><h3>Faça cópias de segurança</h3><p class="muted">O backup usa uma senha exclusiva para o arquivo. Para restaurar, você precisará dela e também da senha do cofre.</p><div class="button-row"><button id="export-backup" class="secondary">Exportar backup cifrado</button><label class="secondary file-button" for="backup-input">Restaurar backup</label><input id="backup-input" type="file" hidden /></div><p class="small">O backup inclui fotos, vídeos e registros locais. Guarde o arquivo e a senha em lugares seguros.</p></section>
       <section class="settings-card"><p class="eyebrow">PRIVACIDADE EXTRA</p><h3>Modo Secreto</h3><p class="muted">${secretCredential ? 'PIN secundário configurado. As mídias secretas ficam fora das telas normais e das Memórias.' : 'Crie um PIN secundário para ocultar mídias das telas normais do cofre e das Memórias.'} As mídias continuam cifradas pela senha principal e o backup inclui todos os arquivos.</p><form id="secret-mode-form" class="stack">${secretCredential ? '<label for="secret-current-pin">PIN atual</label><input id="secret-current-pin" type="password" minlength="8" autocomplete="off" required/>' : ''}<label for="secret-new-pin">${secretCredential ? 'Novo PIN' : 'PIN secundário'}</label><input id="secret-new-pin" type="password" minlength="8" autocomplete="new-password" required/><label for="secret-confirm-pin">Confirme o PIN</label><input id="secret-confirm-pin" type="password" minlength="8" autocomplete="new-password" required/><button class="secondary" type="submit">${secretCredential ? 'Trocar PIN' : 'Ativar Modo Secreto'}</button></form>${secretCredential ? '<button id="recover-secret-media" class="text-button">Esqueci o PIN: revelar mídias secretas</button>' : ''}<p class="small">O PIN é verificado localmente. Ao bloquear o cofre, será necessário digitá-lo novamente para abrir a área secreta.</p></section>
       <section class="settings-card"><p class="eyebrow">CHAT E AVISOS</p><h3>Mensagens temporárias</h3><p class="muted">As fotos enviadas no chat terão uma hora de validade. O destinatário poderá salvar no cofre dele durante esse período.</p><button id="open-chat-settings" class="secondary">Configurar chat e avisos</button><p class="small">Depois de parear os aparelhos, ative os avisos na conversa. A notificação será genérica.</p></section>
+      <section class="settings-card"><p class="eyebrow">APARÊNCIA</p><h3>Tema do Aplicativo</h3><label class="preference-label" for="theme-select">Escolha o modo de cor</label><select id="theme-select"><option value="system">Acompanhar o Sistema</option><option value="light">Sempre Claro</option><option value="dark">Sempre Escuro</option></select><p class="small">Se escolher "Acompanhar o Sistema", o app mudará de acordo com o modo escuro do seu aparelho.</p></section>
+      <section class="settings-card"><p class="eyebrow">SISTEMA</p><h3>Atualizações</h3><p class="muted">A PWA normalmente é atualizada em segundo plano.</p><button id="check-updates" class="secondary">Buscar Atualizações</button><p class="small">Verifica o servidor por uma versão mais recente do aplicativo.</p></section>
     </div>`;
+    
+  const themeSelect = panel.querySelector<HTMLSelectElement>('#theme-select');
+  if (themeSelect) {
+    themeSelect.value = localStorage.getItem('theme-preference') || 'system';
+    themeSelect.addEventListener('change', () => {
+      const theme = themeSelect.value;
+      localStorage.setItem('theme-preference', theme);
+      const isDark = theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.classList.toggle('dark-theme', isDark);
+      const meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute('content', isDark ? '#252220' : '#f4eee8');
+    });
+  }
+
+  panel.querySelector<HTMLButtonElement>('#check-updates')?.addEventListener('click', async (event) => {
+    const btn = event.currentTarget as HTMLButtonElement;
+    btn.textContent = 'Buscando...';
+    btn.disabled = true;
+    try {
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (reg) {
+          await reg.update();
+          showToast('Busca concluída. Se houver nova versão, o botão de atualizar vai surgir na tela.');
+        } else {
+          showToast('O sistema PWA não está ativo neste modo de navegação.');
+        }
+      }
+    } catch {
+      showToast('Não foi possível se comunicar com o servidor agora.');
+    }
+    btn.textContent = 'Buscar Atualizações';
+    btn.disabled = false;
+  });
+
   panel.querySelector<HTMLButtonElement>('#toggle-biometric')?.addEventListener('click', async () => {
     if (bioPref) {
       await deleteRecord('preferences', 'biometric-vault-key');
