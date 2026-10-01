@@ -62,6 +62,8 @@ function revokeUrls(): void {
   urls = [];
 }
 
+let hasAutoTriggeredBiometrics = false;
+
 function mountLock(isNew: boolean, message = ''): void {
   cancelSecureInput?.();
   stopChatPage();
@@ -124,10 +126,18 @@ function mountLock(isNew: boolean, message = ''): void {
         } catch (e) {
           btn.disabled = false;
           btn.innerHTML = 'Desbloquear com Biometria';
+          // Se falhou silenciosamente no auto-trigger, não mostra o toast de erro para não poluir a tela.
+          if (hasAutoTriggeredBiometrics && !event?.isTrusted) return;
           showToast('Biometria falhou ou foi cancelada.');
         }
       };
       form.insertBefore(btn, form.firstChild);
+      
+      // Auto-trigger apenas na primeira vez que a tela é montada
+      if (!hasAutoTriggeredBiometrics) {
+        hasAutoTriggeredBiometrics = true;
+        setTimeout(() => btn.click(), 50);
+      }
     });
   }
 

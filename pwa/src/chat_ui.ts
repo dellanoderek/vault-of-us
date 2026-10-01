@@ -340,7 +340,7 @@ async function conversationPanel(panel: HTMLElement, heading: string, couple: Co
         : message.message_type === 'audio'
           ? `<audio src="${url}" controls></audio>`
           : `<img src="${url}" alt="Foto recebida" loading="lazy" />`;
-      rows.push(`<article class="bubble-row ${mine ? 'mine' : ''}" data-message-id="${message.id}"><div class="chat-bubble media-bubble">${media}${mine ? '' : `<button class="save-chat-media" data-save-media="${message.id}">Salvar no meu cofre</button>`}<time>${clock}</time></div></article>`);
+      rows.push(`<article class="bubble-row ${mine ? 'mine' : ''}" data-message-id="${message.id}"><div class="chat-bubble media-bubble">${media}<button class="save-chat-media" data-save-media="${message.id}">Salvar no meu cofre</button><time>${clock}</time></div></article>`);
     } catch {
       if (Date.parse(message.expires_at) <= Date.now()) { discardMessageContent(message.id); continue; }
       rows.push(`<article class="bubble-row" data-message-id="${message.id}"><div class="chat-bubble"><p>Esta mídia já expirou ou não pode ser aberta.</p></div></article>`);
