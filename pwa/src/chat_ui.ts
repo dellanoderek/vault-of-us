@@ -16,6 +16,15 @@ let conversationRenderGeneration = 0;
 let activeUrls = new Map<string, string>();
 let activeMessageExpiries = new Map<string, number>();
 let activeRecorder: { recorder: MediaRecorder; stream: MediaStream; chunks: Blob[]; discard: boolean } | undefined;
+let cachedUser: User | undefined;
+let cachedCouple: Couple | undefined;
+let cachedSecret: Uint8Array | undefined;
+
+export function clearChatCache(): void {
+  cachedUser = undefined;
+  cachedCouple = undefined;
+  cachedSecret = undefined;
+}
 
 function clearActiveMediaUrls(): void {
   for (const url of activeUrls.values()) URL.revokeObjectURL(url);
@@ -65,10 +74,19 @@ export async function renderChatPage(panel: HTMLElement, vaultKey: CryptoKey, no
     return;
   }
 
+  // Fast path: skip auth network requests when we have cached conversation state
+  if (cachedUser && cachedCouple?.member_two && cachedSecret && !errorMessage) {
+    await conversationPanel(panel, heading, cachedCouple, cachedUser, cachedSecret, vaultKey, notify);
+    return;
+  }
+
+  // Show loading immediately while fetching auth state
+  panel.innerHTML = `${heading}<div class="chat-empty"><div class="loading">Conectando…</div></div>`;
+
   const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
   if (sessionError) return errorPanel(panel, heading, sessionError.message, vaultKey, notify);
   const user = sessionData.session?.user;
-  if (!user) return authPanel(panel, heading, vaultKey, notify, errorMessage);
+  if (!user) { clearChatCache(); return authPanel(panel, heading, vaultKey, notify, errorMessage); }
 
   let couple: Couple | null;
   try { couple = await currentCouple(supabase, user); }
@@ -93,6 +111,9 @@ export async function renderChatPage(panel: HTMLElement, vaultKey: CryptoKey, no
     panel.innerHTML = `${heading}<div class="chat-empty"><h3>Chave de pareamento indisponível</h3><p>O chat não pode ser recuperado só com a conta: a chave privada fica cifrada neste aparelho. Não limpe os dados do site sem exportar uma recuperação.</p></div>`;
     return;
   }
+  cachedUser = user;
+  cachedCouple = couple;
+  cachedSecret = secret;
   await conversationPanel(panel, heading, couple, user, secret, vaultKey, notify);
 }
 
@@ -184,12 +205,94 @@ async function conversationPanel(panel: HTMLElement, heading: string, couple: Co
   if (!supabase) return;
   const generation = ++conversationRenderGeneration;
   const client = supabase;
+
+  // Phase 1: Render conversation shell immediately on first render.
+  // On re-renders (realtime events, send message), keep the existing shell to preserve the compose input text.
+  let messageList = panel.querySelector<HTMLElement>('#message-list');
+  if (!messageList) {
+    panel.innerHTML = `${heading}<div class="conversation-top"><span>Conversa pareada</span><div>${webPushPublicKey() ? '<button id="enable-chat-push" class="text-button">Ativar avisos</button>' : ''}<button id="sign-out" class="text-button">Sair</button></div></div><div class="message-list" id="message-list"><div class="loading">Carregando mensagens…</div></div><form id="chat-compose" class="chat-compose"><button type="button" id="attach-media" class="attach-button" aria-label="Enviar foto, vídeo ou áudio">＋</button><input id="chat-file" type="file" accept="image/*,video/*,audio/*" hidden /><button type="button" id="record-audio" class="attach-button ${activeRecorder ? 'recording' : ''}" aria-label="${activeRecorder ? 'Encerrar gravação' : 'Gravar áudio'}">${activeRecorder ? '■' : '🎙'}</button><input name="text" maxlength="4000" autocomplete="off" placeholder="Escreva uma mensagem…" /><button type="submit" class="send-button" aria-label="Enviar mensagem">➤</button></form><p class="chat-expiry-note">Mensagens, áudios e mídias expiram após 1 hora. Quem recebe pode salvar antes do vencimento.</p>`;
+    messageList = panel.querySelector<HTMLElement>('#message-list')!;
+
+    // Set up event listeners that don't depend on messages (compose, attach, record, push, sign-out)
+    panel.querySelector<HTMLFormElement>('#chat-compose')?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const input = (event.currentTarget as HTMLFormElement).elements.namedItem('text') as HTMLInputElement;
+      const text = input.value.trim();
+      if (!text) return;
+      input.disabled = true;
+      try { await sendText(client, couple.id, user, secret, text); input.value = ''; input.disabled = false; await conversationPanel(panel, heading, couple, user, secret, vaultKey, notify); }
+      catch (error) { input.disabled = false; notify(error instanceof Error ? error.message : 'Não foi possível enviar.'); }
+    });
+    panel.querySelector<HTMLButtonElement>('#attach-media')?.addEventListener('click', () => panel.querySelector<HTMLInputElement>('#chat-file')?.click());
+    panel.querySelector<HTMLInputElement>('#chat-file')?.addEventListener('change', async (event) => {
+      const input = event.currentTarget as HTMLInputElement;
+      const file = input.files?.[0];
+      if (!file) return;
+      if (file.size > 50 * 1024 * 1024 - 16) { notify('Cada mídia do chat pode ter até 50 MB antes da cifragem.'); input.value = ''; return; }
+      try { await sendMedia(client, couple.id, user, secret, file); await conversationPanel(panel, heading, couple, user, secret, vaultKey, notify); }
+      catch (error) { notify(error instanceof Error ? error.message : 'Não foi possível enviar a mídia.'); }
+      input.value = '';
+    });
+    panel.querySelector<HTMLButtonElement>('#record-audio')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget as HTMLButtonElement;
+      if (activeRecorder) { activeRecorder.recorder.stop(); button.textContent = '🎙'; button.classList.remove('recording'); return; }
+      if (!navigator.mediaDevices?.getUserMedia || !('MediaRecorder' in window)) { notify('Este navegador não oferece gravação de áudio.'); return; }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const mimeType = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'].find((mime) => MediaRecorder.isTypeSupported(mime));
+        const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+        const chunks: Blob[] = [];
+        recorder.ondataavailable = (data) => { if (data.data.size) chunks.push(data.data); };
+        recorder.onstop = async () => {
+          stream.getTracks().forEach((track) => track.stop());
+          const discard = activeRecorder?.recorder !== recorder || activeRecorder.discard;
+          if (activeRecorder?.recorder === recorder) activeRecorder = undefined;
+          if (discard) return;
+          const type = recorder.mimeType || 'audio/webm';
+          const audio = new File(chunks, `audio-${Date.now()}.${type.includes('mp4') ? 'm4a' : 'webm'}`, { type });
+          if (audio.size > 50 * 1024 * 1024 - 16) { notify('O áudio ultrapassou o limite de 50 MB.'); return; }
+          try { await sendMedia(client, couple.id, user, secret, audio); await conversationPanel(panel, heading, couple, user, secret, vaultKey, notify); }
+          catch (error) { notify(error instanceof Error ? error.message : 'Não foi possível enviar o áudio.'); }
+        };
+        activeRecorder = { recorder, stream, chunks, discard: false };
+        recorder.start(); button.textContent = '■'; button.classList.add('recording'); notify('Gravando áudio. Toque no botão para encerrar e enviar.');
+      } catch (error) { notify(error instanceof Error ? error.message : 'Permita o microfone para gravar áudio.'); }
+    });
+    panel.querySelector<HTMLButtonElement>('#enable-chat-push')?.addEventListener('click', async () => {
+      try { await subscribeForPush(client, user, webPushPublicKey()!); notify('Avisos ativados. O conteúdo da conversa não aparecerá na notificação.'); }
+      catch (error) { notify(error instanceof Error ? error.message : 'Não foi possível ativar os avisos.'); }
+    });
+    panel.querySelector<HTMLButtonElement>('#sign-out')?.addEventListener('click', async () => { clearChatCache(); await client.auth.signOut(); await renderChatPage(panel, vaultKey, notify); });
+
+    // Set up realtime subscription and polling
+    if (activeCoupleId !== couple.id) {
+      if (activeChannel) void client.removeChannel(activeChannel);
+      activeCoupleId = couple.id;
+      visibilityHandler = () => {
+        if (document.visibilityState !== 'visible') return;
+        removeExpiredVisibleMessages(panel);
+        void conversationPanel(panel, heading, couple, user, secret, vaultKey, notify);
+      };
+      document.addEventListener('visibilitychange', visibilityHandler);
+      activeChannel = client.channel(`chat:${couple.id}`).on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'chat_messages', filter: `couple_id=eq.${couple.id}` },
+        () => { if (document.visibilityState === 'visible') void conversationPanel(panel, heading, couple, user, secret, vaultKey, notify); },
+      ).subscribe();
+      refreshTimer = window.setInterval(() => {
+        if (document.visibilityState === 'visible') void conversationPanel(panel, heading, couple, user, secret, vaultKey, notify);
+      }, 20_000);
+    }
+  }
+
+  // Phase 2: Fetch and render messages (the only network call in the fast path)
   let messages: ChatMessage[];
   try { messages = await listMessages(client, couple.id); }
   catch (error) {
     if (generation !== conversationRenderGeneration || !panel.isConnected) return;
     clearActiveMediaUrls();
-    return errorPanel(panel, heading, error, vaultKey, notify);
+    messageList.innerHTML = '<div class="empty-inline">Não foi possível carregar as mensagens.</div>';
+    return;
   }
   if (generation !== conversationRenderGeneration || !panel.isConnected) return;
   const visibleMessageIds = new Set(messages.map((message) => message.id));
@@ -244,9 +347,21 @@ async function conversationPanel(panel: HTMLElement, heading: string, couple: Co
     }
   }
   if (generation !== conversationRenderGeneration || !panel.isConnected) return;
-  panel.innerHTML = `${heading}<div class="conversation-top"><span>Conversa pareada</span><div>${webPushPublicKey() ? '<button id="enable-chat-push" class="text-button">Ativar avisos</button>' : ''}<button id="sign-out" class="text-button">Sair</button></div></div><div class="message-list" id="message-list">${rows.length ? rows.join('') : '<div class="empty-inline">Ainda não há mensagens. Envie um oi.</div>'}</div><form id="chat-compose" class="chat-compose"><button type="button" id="attach-media" class="attach-button" aria-label="Enviar foto, vídeo ou áudio">＋</button><input id="chat-file" type="file" accept="image/*,video/*,audio/*" hidden /><button type="button" id="record-audio" class="attach-button ${activeRecorder ? 'recording' : ''}" aria-label="${activeRecorder ? 'Encerrar gravação' : 'Gravar áudio'}">${activeRecorder ? '■' : '🎙'}</button><input name="text" maxlength="4000" autocomplete="off" placeholder="Escreva uma mensagem…" /><button type="submit" class="send-button" aria-label="Enviar mensagem">➤</button></form><p class="chat-expiry-note">Mensagens, áudios e mídias expiram após 1 hora. Quem recebe pode salvar antes do vencimento.</p>`;
-  const messageList = panel.querySelector<HTMLElement>('#message-list');
-  if (messageList) messageList.scrollTop = messageList.scrollHeight;
+
+  // Update only the message list (preserves compose input and other shell elements)
+  messageList.innerHTML = rows.length ? rows.join('') : '<div class="empty-inline">Ainda não há mensagens. Envie um oi.</div>';
+
+  // Scroll to bottom reliably: use rAF to ensure layout is complete,
+  // then re-scroll whenever images or videos finish loading (they change scrollHeight)
+  requestAnimationFrame(() => {
+    messageList.scrollTop = messageList.scrollHeight;
+    messageList.querySelectorAll<HTMLImageElement | HTMLVideoElement>('img, video').forEach((media) => {
+      if ('complete' in media && (media as HTMLImageElement).complete) return;
+      media.addEventListener('load', () => { messageList.scrollTop = messageList.scrollHeight; }, { once: true });
+    });
+  });
+
+  // Expiry timer
   if (expiryTimer !== undefined) window.clearTimeout(expiryTimer);
   const nextExpiry = Math.min(...messages.map((message) => Date.parse(message.expires_at)).filter((expiry) => expiry > Date.now()));
   if (Number.isFinite(nextExpiry)) {
@@ -257,51 +372,8 @@ async function conversationPanel(panel: HTMLElement, heading: string, couple: Co
     }, Math.max(0, nextExpiry - Date.now() + 5));
   }
 
-  panel.querySelector<HTMLFormElement>('#chat-compose')?.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const input = (event.currentTarget as HTMLFormElement).elements.namedItem('text') as HTMLInputElement;
-    const text = input.value.trim();
-    if (!text) return;
-    input.disabled = true;
-    try { await sendText(client, couple.id, user, secret, text); await conversationPanel(panel, heading, couple, user, secret, vaultKey, notify); }
-    catch (error) { input.disabled = false; notify(error instanceof Error ? error.message : 'Não foi possível enviar.'); }
-  });
-  panel.querySelector<HTMLButtonElement>('#attach-media')?.addEventListener('click', () => panel.querySelector<HTMLInputElement>('#chat-file')?.click());
-  panel.querySelector<HTMLInputElement>('#chat-file')?.addEventListener('change', async (event) => {
-    const input = event.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
-    if (file.size > 50 * 1024 * 1024 - 16) { notify('Cada mídia do chat pode ter até 50 MB antes da cifragem.'); input.value = ''; return; }
-    try { await sendMedia(client, couple.id, user, secret, file); await conversationPanel(panel, heading, couple, user, secret, vaultKey, notify); }
-    catch (error) { notify(error instanceof Error ? error.message : 'Não foi possível enviar a mídia.'); }
-    input.value = '';
-  });
-  panel.querySelector<HTMLButtonElement>('#record-audio')?.addEventListener('click', async (event) => {
-    const button = event.currentTarget as HTMLButtonElement;
-    if (activeRecorder) { activeRecorder.recorder.stop(); button.textContent = '🎙'; button.classList.remove('recording'); return; }
-    if (!navigator.mediaDevices?.getUserMedia || !('MediaRecorder' in window)) { notify('Este navegador não oferece gravação de áudio.'); return; }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mimeType = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'].find((mime) => MediaRecorder.isTypeSupported(mime));
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-      const chunks: Blob[] = [];
-      recorder.ondataavailable = (data) => { if (data.data.size) chunks.push(data.data); };
-      recorder.onstop = async () => {
-        stream.getTracks().forEach((track) => track.stop());
-        const discard = activeRecorder?.recorder !== recorder || activeRecorder.discard;
-        if (activeRecorder?.recorder === recorder) activeRecorder = undefined;
-        if (discard) return;
-        const type = recorder.mimeType || 'audio/webm';
-        const audio = new File(chunks, `audio-${Date.now()}.${type.includes('mp4') ? 'm4a' : 'webm'}`, { type });
-        if (audio.size > 50 * 1024 * 1024 - 16) { notify('O áudio ultrapassou o limite de 50 MB.'); return; }
-        try { await sendMedia(client, couple.id, user, secret, audio); await conversationPanel(panel, heading, couple, user, secret, vaultKey, notify); }
-        catch (error) { notify(error instanceof Error ? error.message : 'Não foi possível enviar o áudio.'); }
-      };
-      activeRecorder = { recorder, stream, chunks, discard: false };
-      recorder.start(); button.textContent = '■'; button.classList.add('recording'); notify('Gravando áudio. Toque no botão para encerrar e enviar.');
-    } catch (error) { notify(error instanceof Error ? error.message : 'Permita o microfone para gravar áudio.'); }
-  });
-  panel.querySelectorAll<HTMLButtonElement>('[data-save-media]').forEach((button) => button.addEventListener('click', async () => {
+  // Save-media listeners (re-attached each time messages are updated since the buttons are recreated)
+  messageList.querySelectorAll<HTMLButtonElement>('[data-save-media]').forEach((button) => button.addEventListener('click', async () => {
     const message = messages.find((item) => item.id === button.dataset.saveMedia);
     if (!message || !message.media_type) return;
     button.disabled = true;
@@ -321,28 +393,4 @@ async function conversationPanel(panel: HTMLElement, heading: string, couple: Co
       notify(result.duplicate ? 'Esta mídia já existe no cofre deste aparelho.' : 'Cópia cifrada salva no cofre deste aparelho.');
     } catch (error) { button.disabled = false; notify(error instanceof Error ? error.message : 'Não foi possível salvar.'); }
   }));
-  panel.querySelector<HTMLButtonElement>('#enable-chat-push')?.addEventListener('click', async () => {
-    try { await subscribeForPush(client, user, webPushPublicKey()!); notify('Avisos ativados. O conteúdo da conversa não aparecerá na notificação.'); }
-    catch (error) { notify(error instanceof Error ? error.message : 'Não foi possível ativar os avisos.'); }
-  });
-  panel.querySelector<HTMLButtonElement>('#sign-out')?.addEventListener('click', async () => { await client.auth.signOut(); await renderChatPage(panel, vaultKey, notify); });
-
-  if (activeCoupleId !== couple.id) {
-    if (activeChannel) void client.removeChannel(activeChannel);
-    activeCoupleId = couple.id;
-    visibilityHandler = () => {
-      if (document.visibilityState !== 'visible') return;
-      removeExpiredVisibleMessages(panel);
-      void conversationPanel(panel, heading, couple, user, secret, vaultKey, notify);
-    };
-    document.addEventListener('visibilitychange', visibilityHandler);
-    activeChannel = client.channel(`chat:${couple.id}`).on(
-      'postgres_changes',
-      { event: '*', schema: 'public', table: 'chat_messages', filter: `couple_id=eq.${couple.id}` },
-      () => { if (document.visibilityState === 'visible') void conversationPanel(panel, heading, couple, user, secret, vaultKey, notify); },
-    ).subscribe();
-    refreshTimer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void conversationPanel(panel, heading, couple, user, secret, vaultKey, notify);
-    }, 20_000);
-  }
 }

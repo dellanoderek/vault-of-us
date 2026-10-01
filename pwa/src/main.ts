@@ -89,6 +89,48 @@ function mountLock(isNew: boolean, message = ''): void {
         <p class="security-note">A senha não é enviada ao servidor. Se você esquecê-la, este cofre não poderá ser recuperado sem um backup.</p>
       </div>
     </main>`;
+  
+  if (!isNew) {
+    getRecord<{ credentialId: string; rawKey: string }>('preferences', 'biometric-vault-key').then((bioPref) => {
+      if (!bioPref) return;
+      const form = root.querySelector('#unlock-form');
+      if (!form) return;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'secondary';
+      btn.style.marginBottom = '0.5rem';
+      btn.innerHTML = 'Desbloquear com Biometria';
+      btn.onclick = async () => {
+        try {
+          btn.disabled = true;
+          btn.textContent = 'Verificando...';
+          const challenge = crypto.getRandomValues(new Uint8Array(32));
+          const assertion = await navigator.credentials.get({
+            publicKey: {
+              challenge,
+              allowCredentials: [{ type: 'public-key', id: asBuffer(fromBase64(bioPref.credentialId)) }],
+              userVerification: 'required'
+            }
+          });
+          if (assertion) {
+            vaultKey = await crypto.subtle.importKey('raw', asBuffer(fromBase64(bioPref.rawKey)), 'AES-GCM', false, ['encrypt', 'decrypt']);
+            const lockPreference = await getRecord<{ key: string; value: number }>('preferences', 'lock-timeout');
+            lockTimeoutMs = lockPreference?.value ?? 0;
+            await requestPersistentStorage();
+            const purged = await purgeExpiredTrash(vaultKey);
+            renderApp();
+            if (purged) showToast(`${purged} ${purged === 1 ? 'item removido' : 'itens removidos'} da lixeira.`);
+          }
+        } catch (e) {
+          btn.disabled = false;
+          btn.innerHTML = 'Desbloquear com Biometria';
+          showToast('Biometria falhou ou foi cancelada.');
+        }
+      };
+      form.insertBefore(btn, form.firstChild);
+    });
+  }
+
   document.querySelector<HTMLFormElement>('#unlock-form')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget as HTMLFormElement);
@@ -313,6 +355,8 @@ async function renderSettings(panel: HTMLElement): Promise<void> {
   const key = vaultKey;
   if (!key) return;
   const secretCredential = await getRecord<SecretModeCredential>('preferences', 'secret-mode-pin');
+  const bioPref = await getRecord<{ credentialId: string; rawKey: string }>('preferences', 'biometric-vault-key');
+  const biometricSupported = window.PublicKeyCredential !== undefined;
   const estimate = await navigator.storage?.estimate().catch(() => undefined);
   const persisted = await navigator.storage?.persisted().catch(() => false);
   const used = estimate?.usage ?? 0;
@@ -321,11 +365,46 @@ async function renderSettings(panel: HTMLElement): Promise<void> {
   const permanentCount = media.length;
   panel.innerHTML = `<div class="section-heading"><div><p class="eyebrow">CONTROLE DO APARELHO</p><h2>Ajustes do cofre</h2><p class="muted">Os dados abaixo pertencem ao armazenamento deste iPhone.</p></div></div>
     <div class="settings-grid">
+      <section class="settings-card"><p class="eyebrow">DESBLOQUEIO RÁPIDO</p><h3>Face ID ou Digital</h3><p class="muted">${bioPref ? 'A biometria está ativada neste aparelho.' : 'Use biometria para abrir o cofre sem digitar a senha.'}</p>${biometricSupported ? `<button id="toggle-biometric" class="secondary">${bioPref ? 'Desativar Biometria' : 'Ativar Biometria'}</button>` : '<p class="small">Biometria não suportada neste navegador.</p>'}<p class="small">Se você remover os dados do site no sistema, a biometria e o cofre local serão desvinculados.</p></section>
       <section class="settings-card"><p class="eyebrow">ARMAZENAMENTO LOCAL</p><h3>${formatSize(used)} usados</h3><p class="muted">${quota ? `Estimativa disponível para este site: ${formatSize(Math.max(0, quota - used))}.` : 'O iPhone não informou uma estimativa de espaço.'}</p><div class="meter"><span style="width:${quota ? Math.min(100, Math.max(2, used / quota * 100)) : 0}%"></span></div><p class="small">${permanentCount} itens no cofre · ${persisted ? 'pedido de persistência concedido' : 'persistência ainda não concedida'}</p><button id="persist-storage" class="secondary">Proteger dados locais contra limpeza automática</button><label class="preference-label" for="lock-timeout">Bloqueio ao sair do app</label><select id="lock-timeout"><option value="0" ${lockTimeoutMs === 0 ? 'selected' : ''}>Imediato</option><option value="30000" ${lockTimeoutMs === 30000 ? 'selected' : ''}>Após 30 segundos</option><option value="60000" ${lockTimeoutMs === 60000 ? 'selected' : ''}>Após 1 minuto</option><option value="300000" ${lockTimeoutMs === 300000 ? 'selected' : ''}>Após 5 minutos</option></select><p class="small">No segundo plano, o navegador pode suspender temporizadores; o prazo é conferido ao voltar.</p><p class="small">O navegador ainda pode remover dados se a pessoa apagar o site, os dados do Safari ou a PWA.</p></section>
       <section class="settings-card"><p class="eyebrow">RECUPERAÇÃO</p><h3>Faça cópias de segurança</h3><p class="muted">O backup usa uma senha exclusiva para o arquivo. Para restaurar, você precisará dela e também da senha do cofre.</p><div class="button-row"><button id="export-backup" class="secondary">Exportar backup cifrado</button><label class="secondary file-button" for="backup-input">Restaurar backup</label><input id="backup-input" type="file" accept="application/vnd.vault-of-us.backup+json,.voub" hidden /></div><p class="small">O backup inclui fotos, vídeos e registros locais. Guarde o arquivo e a senha em lugares seguros.</p></section>
       <section class="settings-card"><p class="eyebrow">PRIVACIDADE EXTRA</p><h3>Modo Secreto</h3><p class="muted">${secretCredential ? 'PIN secundário configurado. As mídias secretas ficam fora das telas normais e das Memórias.' : 'Crie um PIN secundário para ocultar mídias das telas normais do cofre e das Memórias.'} As mídias continuam cifradas pela senha principal e o backup inclui todos os arquivos.</p><form id="secret-mode-form" class="stack">${secretCredential ? '<label for="secret-current-pin">PIN atual</label><input id="secret-current-pin" type="password" minlength="8" autocomplete="off" required/>' : ''}<label for="secret-new-pin">${secretCredential ? 'Novo PIN' : 'PIN secundário'}</label><input id="secret-new-pin" type="password" minlength="8" autocomplete="new-password" required/><label for="secret-confirm-pin">Confirme o PIN</label><input id="secret-confirm-pin" type="password" minlength="8" autocomplete="new-password" required/><button class="secondary" type="submit">${secretCredential ? 'Trocar PIN' : 'Ativar Modo Secreto'}</button></form>${secretCredential ? '<button id="recover-secret-media" class="text-button">Esqueci o PIN: revelar mídias secretas</button>' : ''}<p class="small">O PIN é verificado localmente. Ao bloquear o cofre, será necessário digitá-lo novamente para abrir a área secreta.</p></section>
       <section class="settings-card"><p class="eyebrow">CHAT E AVISOS</p><h3>Mensagens temporárias</h3><p class="muted">As fotos enviadas no chat terão uma hora de validade. O destinatário poderá salvar no cofre dele durante esse período.</p><button id="open-chat-settings" class="secondary">Configurar chat e avisos</button><p class="small">Depois de parear os aparelhos, ative os avisos na conversa. A notificação será genérica.</p></section>
     </div>`;
+  panel.querySelector<HTMLButtonElement>('#toggle-biometric')?.addEventListener('click', async () => {
+    if (bioPref) {
+      await deleteRecord('preferences', 'biometric-vault-key');
+      showToast('Biometria desativada.');
+      await renderSettings(panel);
+      return;
+    }
+    try {
+      const challenge = crypto.getRandomValues(new Uint8Array(32));
+      const userId = crypto.getRandomValues(new Uint8Array(16));
+      const credential = await navigator.credentials.create({
+        publicKey: {
+          challenge,
+          rp: { name: 'Vault of Us', id: location.hostname },
+          user: { id: userId, name: 'Cofre', displayName: 'Acesso ao Cofre' },
+          pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+          authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required' },
+          timeout: 60000
+        }
+      });
+      if (credential) {
+        const exported = await crypto.subtle.exportKey('raw', vaultKey!);
+        await putRecord('preferences', {
+          key: 'biometric-vault-key',
+          credentialId: toBase64(new Uint8Array((credential as PublicKeyCredential).rawId)),
+          rawKey: toBase64(new Uint8Array(exported))
+        });
+        showToast('Biometria ativada com sucesso!');
+        await renderSettings(panel);
+      }
+    } catch (error) {
+      showToast('Não foi possível registrar a biometria.');
+    }
+  });
   panel.querySelector<HTMLFormElement>('#secret-mode-form')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const currentPin = panel.querySelector<HTMLInputElement>('#secret-current-pin')?.value;
@@ -747,6 +826,10 @@ async function start(): Promise<void> {
       backgroundAt = undefined;
     }
   });
+  // Prevent iOS Safari pinch-to-zoom (Safari ignores user-scalable=no since iOS 10).
+  // The custom pinch-zoom in the media viewer uses pointer events, so this does not interfere.
+  document.addEventListener('touchmove', (event) => { if (event.touches.length > 1) event.preventDefault(); }, { passive: false });
+  document.addEventListener('gesturestart', (event) => event.preventDefault());
 }
 
 void start();
